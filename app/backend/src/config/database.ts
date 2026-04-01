@@ -19,13 +19,23 @@ class Database {
   private isInitialized: boolean = false;
 
   constructor() {
+    // Prefer DATABASE_URL (Render/Neon/Supabase) over individual env vars
+    const connectionConfig = process.env.DATABASE_URL
+      ? {
+          connectionString: process.env.DATABASE_URL,
+          ssl: { rejectUnauthorized: false },
+        }
+      : {
+          host: config.database.host,
+          port: config.database.port,
+          database: config.database.name,
+          user: config.database.user,
+          password: config.database.password,
+        };
+
     this.pool = new Pool({
-      host: config.database.host,
-      port: config.database.port,
-      database: config.database.name,
-      user: config.database.user,
-      password: config.database.password,
-      max: 20, // Maximum connections in pool
+      ...connectionConfig,
+      max: 20,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 2000,
     });
