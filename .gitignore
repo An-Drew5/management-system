@@ -1,0 +1,14 @@
+# Environment files — never commit secrets
+.env
+.env.local
+.env.production
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+
+# OS
+.DS_Store
+Thumbs.db

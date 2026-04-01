@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: arrow-backend
+    runtime: node
+    region: oregon
+    rootDir: app/backend
+    buildCommand: pnpm install && pnpm build
+    startCommand: node dist/index.js
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: DATABASE_URL
+        sync: false   # Set manually in Render dashboard
+      - key: JWT_SECRET
+        sync: false   # Set manually in Render dashboard
+      - key: JWT_EXPIRES_IN
+        value: 1d
+      - key: LOG_LEVEL
+        value: info
+      # CORS_ORIGIN will be your Vercel frontend URL
+      # Set this manually in the Render dashboard after Vercel deploys
+      - key: CORS_ORIGIN
+        sync: false
