@@ -2,6 +2,7 @@ import { PoolClient } from "pg";
 import database from "@config/database";
 import BaseService from "./baseService";
 import { AppError } from "@utils/errors";
+import authService from "./authService";
 
 export type StudentStatus =
   | "active"
@@ -33,6 +34,40 @@ export interface CreateStudentInput {
   status?: StudentStatus;
   allergies?: string;
   disabilities?: string;
+}
+
+export type GuardianRelationship = "father" | "mother" | "guardian";
+
+export interface GuardianInput {
+  email: string;
+  password: string;
+  relationship: string;
+}
+
+export interface EnrolledGuardian {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  email: string;
+  relationship: GuardianRelationship;
+  created_at: string;
+}
+
+export interface EnrollStudentInput {
+  tenantId: string;
+  firstName: string;
+  lastName: string;
+  otherNames?: string;
+  classId: string;
+  status?: StudentStatus;
+  allergies?: string;
+  disabilities?: string;
+  guardians?: GuardianInput[];
+}
+
+export interface EnrollStudentResult {
+  student: Student;
+  guardians: EnrolledGuardian[];
 }
 
 class StudentService extends BaseService {
@@ -286,6 +321,268 @@ class StudentService extends BaseService {
 
       return (result.rows[0] as Student) || null;
     } catch (error) {
+      this.handleError(error);
+    }
+  }
+
+  // ─── Enrollment helpers ───────────────────────────────────────────────────
+
+  private static readonly ALLOWED_RELATIONSHIPS: GuardianRelationship[] = [
+    "father",
+    "mother",
+    "guardian",
+  ];
+
+  private normalizeGuardianEmail(email: string): string {
+    const normalized = (email || "").trim().toLowerCase();
+    if (!normalized || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+      throw new AppError("A valid guardian email is required", 400);
+    }
+    return normalized;
+  }
+
+  private normalizeGuardianRelationship(value: string): GuardianRelationship {
+    const normalized = (value || "")
+      .trim()
+      .toLowerCase() as GuardianRelationship;
+    if (!StudentService.ALLOWED_RELATIONSHIPS.includes(normalized)) {
+      throw new AppError(
+        `Guardian relationship must be one of: ${StudentService.ALLOWED_RELATIONSHIPS.join(", ")}`,
+        400,
+      );
+    }
+    return normalized;
+  }
+
+  private async ensureGuardianRoleInTx(
+    client: PoolClient,
+    tenantId: string,
+  ): Promise<string> {
+    await client.query(
+      `
+        INSERT INTO roles (tenant_id, name)
+        VALUES ($1, 'guardian')
+        ON CONFLICT (tenant_id, name) DO NOTHING
+      `,
+      [tenantId],
+    );
+
+    const result = await client.query(
+      `
+        SELECT id
+        FROM roles
+        WHERE tenant_id = $1 AND name = 'guardian'
+        LIMIT 1
+      `,
+      [tenantId],
+    );
+
+    if ((result.rowCount ?? 0) === 0) {
+      throw new AppError("Guardian role could not be resolved", 500);
+    }
+
+    return result.rows[0].id as string;
+  }
+
+  private async createAndLinkGuardianInTx(
+    client: PoolClient,
+    tenantId: string,
+    studentDbId: string,
+    guardianInput: GuardianInput,
+  ): Promise<EnrolledGuardian> {
+    const email = this.normalizeGuardianEmail(guardianInput.email);
+    const relationship = this.normalizeGuardianRelationship(
+      guardianInput.relationship,
+    );
+    const password = guardianInput.password ?? "";
+
+    if (password.trim().length < 8) {
+      throw new AppError(
+        `Guardian password for "${email}" must be at least 8 characters`,
+        400,
+      );
+    }
+
+    const existingUser = await client.query(
+      `
+        SELECT 1
+        FROM users
+        WHERE tenant_id = $1 AND email = $2
+        LIMIT 1
+      `,
+      [tenantId, email],
+    );
+
+    if ((existingUser.rowCount ?? 0) > 0) {
+      throw new AppError(
+        `A user with email "${email}" already exists in this tenant`,
+        409,
+      );
+    }
+
+    const passwordHash = await authService.hashPassword(password);
+
+    const userResult = await client.query(
+      `
+        INSERT INTO users (tenant_id, email, password_hash, role)
+        VALUES ($1, $2, $3, 'guardian')
+        RETURNING id
+      `,
+      [tenantId, email, passwordHash],
+    );
+
+    const userId = userResult.rows[0].id as string;
+    const guardianRoleId = await this.ensureGuardianRoleInTx(client, tenantId);
+
+    await client.query(
+      `
+        INSERT INTO user_roles (user_id, role_id)
+        VALUES ($1, $2)
+        ON CONFLICT (user_id) DO UPDATE SET role_id = EXCLUDED.role_id
+      `,
+      [userId, guardianRoleId],
+    );
+
+    const guardianResult = await client.query(
+      `
+        INSERT INTO guardians (tenant_id, user_id, relationship)
+        VALUES ($1, $2, $3)
+        RETURNING id, tenant_id, user_id, relationship, created_at
+      `,
+      [tenantId, userId, relationship],
+    );
+
+    const guardianDbId = guardianResult.rows[0].id as string;
+
+    await client.query(
+      `
+        INSERT INTO student_guardians (student_id, guardian_id)
+        VALUES ($1, $2)
+      `,
+      [studentDbId, guardianDbId],
+    );
+
+    return {
+      ...(guardianResult.rows[0] as Omit<EnrolledGuardian, "email">),
+      email,
+    } as EnrolledGuardian;
+  }
+
+  async enrollStudent(input: EnrollStudentInput): Promise<EnrollStudentResult> {
+    try {
+      const tenantId = (input.tenantId || "").trim();
+      const classId = (input.classId || "").trim();
+      const firstName = this.normalizeText(input.firstName, 120);
+      const lastName = this.normalizeText(input.lastName, 120);
+      const otherNames = this.normalizeOptionalText(input.otherNames, 180);
+      const allergies = this.normalizeOptionalText(input.allergies, 3000);
+      const disabilities = this.normalizeOptionalText(input.disabilities, 3000);
+      const status: StudentStatus = input.status || "active";
+      const guardians = input.guardians ?? [];
+
+      this.assertValidUuid(tenantId, "tenantId");
+      this.assertValidUuid(classId, "classId");
+
+      if (!firstName || !lastName) {
+        throw new AppError("firstName and lastName are required", 400);
+      }
+
+      const allowedStatuses: StudentStatus[] = [
+        "active",
+        "graduated",
+        "transferred",
+        "repeating",
+      ];
+
+      if (!allowedStatuses.includes(status)) {
+        throw new AppError("Invalid student status", 400);
+      }
+
+      if (!Array.isArray(guardians)) {
+        throw new AppError("guardians must be an array", 400);
+      }
+
+      if (guardians.length > 2) {
+        throw new AppError("A student can have at most 2 guardians", 400);
+      }
+
+      return await database.withTransaction<EnrollStudentResult>(
+        async (client) => {
+          // Step 1: Validate class belongs to this tenant
+          await this.assertClassInTenant(client, tenantId, classId);
+
+          // Step 2: Generate student ID atomically
+          const studentId = await this.generateStudentIdWithClient(
+            client,
+            tenantId,
+          );
+
+          // Step 3: Insert student
+          const studentResult = await client.query(
+            `
+              INSERT INTO students (
+                tenant_id,
+                student_id,
+                first_name,
+                last_name,
+                other_names,
+                class_id,
+                status,
+                allergies,
+                disabilities
+              )
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+              RETURNING
+                id,
+                tenant_id,
+                student_id,
+                first_name,
+                last_name,
+                other_names,
+                class_id,
+                status,
+                allergies,
+                disabilities,
+                created_at,
+                updated_at
+            `,
+            [
+              tenantId,
+              studentId,
+              firstName,
+              lastName,
+              otherNames,
+              classId,
+              status,
+              allergies,
+              disabilities,
+            ],
+          );
+
+          const student = studentResult.rows[0] as Student;
+
+          // Step 4: Create and link each guardian (0–2) inside same transaction
+          const linkedGuardians: EnrolledGuardian[] = [];
+
+          for (const guardianInput of guardians) {
+            const guardian = await this.createAndLinkGuardianInTx(
+              client,
+              tenantId,
+              student.id,
+              guardianInput,
+            );
+            linkedGuardians.push(guardian);
+          }
+
+          // Step 5: Commit (handled by withTransaction)
+          return { student, guardians: linkedGuardians };
+        },
+        tenantId,
+      );
+    } catch (error: any) {
+      if (error?.code === "23505") {
+        throw new AppError("Duplicate entry detected during enrollment", 409);
+      }
       this.handleError(error);
     }
   }

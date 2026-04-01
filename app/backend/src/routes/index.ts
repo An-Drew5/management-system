@@ -2,6 +2,7 @@ import { Router } from "express";
 import healthRoutes from "./health";
 import tenantRoutes from "./tenants";
 import authRoutes from "./auth";
+import studentRoutes from "./students";
 
 const router: Router = Router();
 
@@ -11,6 +12,7 @@ const router: Router = Router();
 router.use("/v1", healthRoutes);
 router.use("/v1", tenantRoutes);
 router.use("/v1", authRoutes);
+router.use("/v1", studentRoutes);
 
 /**
  * Health check at root level

@@ -26,9 +26,18 @@ class App {
     this.app.use(helmet());
 
     // CORS middleware
+    const allowedOrigins = config.api.corsOrigin
+      .split(",")
+      .map((o) => o.trim())
+      .filter(Boolean);
     this.app.use(
       cors({
-        origin: config.api.corsOrigin,
+        origin: (origin, callback) => {
+          // Allow requests with no origin (e.g. curl, Postman)
+          if (!origin) return callback(null, true);
+          if (allowedOrigins.includes(origin)) return callback(null, true);
+          callback(new Error(`CORS: origin ${origin} not allowed`));
+        },
         credentials: true,
       }),
     );
