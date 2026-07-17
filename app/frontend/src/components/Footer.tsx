@@ -14,6 +14,9 @@ export default function Footer() {
           <span className="hover:text-[#F8F7F2]/60 cursor-pointer transition-colors">
             Terms of Service
           </span>
+          <span className="hover:text-[#F8F7F2]/60 cursor-pointer transition-colors">
+            Contact Us
+          </span>
         </div>
       </div>
     </footer>
