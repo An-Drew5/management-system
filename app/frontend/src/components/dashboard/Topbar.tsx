@@ -2,6 +2,7 @@ interface TopbarProps {
   role?: string;
 }
 
+//this function returns a greeting based on the current time of day
 function getGreeting(): string {
   const hour = new Date().getHours();
   if (hour < 12) return "Good morning";
